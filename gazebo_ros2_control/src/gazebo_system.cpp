@@ -41,6 +41,9 @@ public:
   /// \brief last time the write method was called.
   rclcpp::Time last_update_sim_time_ros_;
 
+  /// \brief Gazebo joint controller
+  gazebo::physics::JointControllerPtr sim_joint_controller_;
+
   /// \brief vector with the joint's names.
   std::vector<std::string> joint_names_;
 
@@ -109,6 +112,8 @@ bool GazeboSystem::initSim(
     RCLCPP_ERROR(this->nh_->get_logger(), "No physics engine configured in Gazebo.");
     return false;
   }
+
+  this->dataPtr->sim_joint_controller_.reset(new gazebo::physics::JointController(parent_model));
 
   registerJoints(hardware_info, parent_model);
   registerSensors(hardware_info, parent_model);
@@ -206,6 +211,35 @@ void GazeboSystem::registerJoints(
           hardware_interface::HW_IF_EFFORT,
           &this->dataPtr->joint_effort_[j]);
       }
+    }
+
+    // Add joint to gazebo joint controller
+    this->dataPtr->sim_joint_controller_->AddJoint(parent_model->GetJoint(joint_name));
+
+    // Check for position control pid parameters
+    if (hardware_info.joints[j].parameters.find("position_pid") !=
+        hardware_info.joints[j].parameters.end())
+    {
+      std::string::size_type sz;
+      std::string pid_str = hardware_info.joints[j].parameters.at("position_pid");
+      double kp = stod(pid_str, &sz);
+      double ki = stod(pid_str.substr(sz), &sz);
+      double kd = stod(pid_str.substr(sz));
+      this->dataPtr->sim_joint_controller_->SetPositionPID(
+        simjoint->GetScopedName(), gazebo::common::PID(kp, ki, kd));
+    }
+
+    // Check for velocity control pid parameters
+    if (hardware_info.joints[j].parameters.find("velocity_pid") !=
+        hardware_info.joints[j].parameters.end())
+    {
+      std::string::size_type sz;
+      std::string pid_str = hardware_info.joints[j].parameters.at("velocity_pid");
+      double kp = stod(pid_str, &sz);
+      double ki = stod(pid_str.substr(sz), &sz);
+      double kd = stod(pid_str.substr(sz));
+      this->dataPtr->sim_joint_controller_->SetVelocityPID(
+        simjoint->GetScopedName(), gazebo::common::PID(kp, ki, kd));
     }
   }
 }
@@ -428,14 +462,26 @@ hardware_interface::return_type GazeboSystem::write()
   for (unsigned int j = 0; j < this->dataPtr->joint_names_.size(); j++) {
     if (this->dataPtr->sim_joints_[j]) {
       if (this->dataPtr->joint_control_methods_[j] & POSITION) {
-        this->dataPtr->sim_joints_[j]->SetPosition(
-          0, this->dataPtr->joint_position_cmd_[j],
-          true);
+        auto pid_map = this->dataPtr->sim_joint_controller_->GetPositionPIDs();
+        if (pid_map.find(this->dataPtr->sim_joints_[j]->GetScopedName()) != pid_map.end()) {
+          this->dataPtr->sim_joint_controller_->SetPositionTarget(
+            this->dataPtr->sim_joints_[j]->GetScopedName(), this->dataPtr->joint_position_cmd_[j]);
+        } else {
+          this->dataPtr->sim_joints_[j]->SetPosition(
+            0, this->dataPtr->joint_position_cmd_[j],
+            true);
+        }
       }
       if (this->dataPtr->joint_control_methods_[j] & VELOCITY) {
-        this->dataPtr->sim_joints_[j]->SetVelocity(
-          0,
-          this->dataPtr->joint_velocity_cmd_[j]);
+        auto pid_map = this->dataPtr->sim_joint_controller_->GetVelocityPIDs();
+        if (pid_map.find(this->dataPtr->sim_joints_[j]->GetScopedName()) != pid_map.end()) {
+          this->dataPtr->sim_joint_controller_->SetVelocityTarget(
+            this->dataPtr->sim_joints_[j]->GetScopedName(), this->dataPtr->joint_velocity_cmd_[j]);
+        } else {
+          this->dataPtr->sim_joints_[j]->SetVelocity(
+            0,
+            this->dataPtr->joint_velocity_cmd_[j]);
+        }
       }
       if (this->dataPtr->joint_control_methods_[j] & EFFORT) {
         const double effort =
@@ -445,6 +491,7 @@ hardware_interface::return_type GazeboSystem::write()
     }
   }
 
+  this->dataPtr->sim_joint_controller_->Update();
   this->dataPtr->last_update_sim_time_ros_ = sim_time_ros;
 
   return hardware_interface::return_type::OK;
