@@ -159,10 +159,6 @@ void GazeboSystem::registerJoints(
       continue;
     }
 
-    // Set joint max force
-    double effort_limit = simjoint->GetEffortLimit(0);
-    simjoint->SetParam("fmax", 0, effort_limit);
-
     // Accept this joint and continue configuration
     RCLCPP_INFO_STREAM(this->nh_->get_logger(), "Loading joint: " << joint_name);
 
