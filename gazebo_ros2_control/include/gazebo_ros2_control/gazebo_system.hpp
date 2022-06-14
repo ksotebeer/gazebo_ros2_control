@@ -48,6 +48,11 @@ public:
   std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
 
   // Documentation Inherited
+  hardware_interface::return_type perform_command_mode_switch(
+    const std::vector<std::string> & start_interfaces,
+    const std::vector<std::string> & stop_interfaces) override;
+
+  // Documentation Inherited
   hardware_interface::return_type start() override;
 
   // Documentation Inherited
@@ -70,6 +75,14 @@ private:
   void registerJoints(
     const hardware_interface::HardwareInfo & hardware_info,
     gazebo::physics::ModelPtr parent_model);
+
+  void initJointPositionPID(
+    const hardware_interface::HardwareInfo & hardware_info,
+    unsigned int joint_index);
+
+  void initJointVelocityPID(
+    const hardware_interface::HardwareInfo & hardware_info,
+    unsigned int joint_index);
 
   void registerSensors(
     const hardware_interface::HardwareInfo & hardware_info,

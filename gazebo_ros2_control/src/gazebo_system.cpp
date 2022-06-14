@@ -41,6 +41,11 @@ public:
   /// \brief last time the write method was called.
   rclcpp::Time last_update_sim_time_ros_;
 
+  /// \brief Gazebo joint controller
+  gazebo::physics::JointControllerPtr sim_joint_controller_;
+  std::vector<bool> joint_position_pid_;
+  std::vector<bool> joint_velocity_pid_;
+
   /// \brief vector with the joint's names.
   std::vector<std::string> joint_names_;
 
@@ -110,6 +115,9 @@ bool GazeboSystem::initSim(
     return false;
   }
 
+  // Initialize gazebo joint controller
+  this->dataPtr->sim_joint_controller_ = parent_model->GetJointController();
+
   registerJoints(hardware_info, parent_model);
   registerSensors(hardware_info, parent_model);
 
@@ -136,6 +144,9 @@ void GazeboSystem::registerJoints(
   this->dataPtr->joint_velocity_cmd_.resize(this->dataPtr->n_dof_);
   this->dataPtr->joint_effort_cmd_.resize(this->dataPtr->n_dof_);
 
+  this->dataPtr->joint_position_pid_.resize(this->dataPtr->n_dof_, false);
+  this->dataPtr->joint_velocity_pid_.resize(this->dataPtr->n_dof_, false);
+
   for (unsigned int j = 0; j < this->dataPtr->n_dof_; j++) {
     std::string joint_name = this->dataPtr->joint_names_[j] = hardware_info.joints[j].name;
 
@@ -157,7 +168,7 @@ void GazeboSystem::registerJoints(
     for (unsigned int i = 0; i < hardware_info.joints[j].command_interfaces.size(); i++) {
       if (hardware_info.joints[j].command_interfaces[i].name == "position") {
         RCLCPP_INFO_STREAM(this->nh_->get_logger(), "\t\t position");
-        this->dataPtr->joint_control_methods_[j] |= POSITION;
+        initJointPositionPID(hardware_info, j);
         this->dataPtr->command_interfaces_.emplace_back(
           joint_name,
           hardware_interface::HW_IF_POSITION,
@@ -165,14 +176,13 @@ void GazeboSystem::registerJoints(
       }
       if (hardware_info.joints[j].command_interfaces[i].name == "velocity") {
         RCLCPP_INFO_STREAM(this->nh_->get_logger(), "\t\t velocity");
-        this->dataPtr->joint_control_methods_[j] |= VELOCITY;
+        initJointVelocityPID(hardware_info, j);
         this->dataPtr->command_interfaces_.emplace_back(
           joint_name,
           hardware_interface::HW_IF_VELOCITY,
           &this->dataPtr->joint_velocity_cmd_[j]);
       }
       if (hardware_info.joints[j].command_interfaces[i].name == "effort") {
-        this->dataPtr->joint_control_methods_[j] |= EFFORT;
         RCLCPP_INFO_STREAM(this->nh_->get_logger(), "\t\t effort");
         this->dataPtr->command_interfaces_.emplace_back(
           joint_name,
@@ -207,6 +217,44 @@ void GazeboSystem::registerJoints(
           &this->dataPtr->joint_effort_[j]);
       }
     }
+  }
+}
+
+void GazeboSystem::initJointPositionPID(
+  const hardware_interface::HardwareInfo & hardware_info,
+  unsigned int joint_index)
+{
+  // Set position control PID parameters
+  if (hardware_info.joints[joint_index].parameters.find("position_pid") !=
+      hardware_info.joints[joint_index].parameters.end())
+  {
+    std::string::size_type sz;
+    std::string pid_str = hardware_info.joints[joint_index].parameters.at("position_pid");
+    double kp = stod(pid_str, &sz);
+    double ki = stod(pid_str.substr(sz), &sz);
+    double kd = stod(pid_str.substr(sz));
+    this->dataPtr->sim_joint_controller_->SetPositionPID(
+      this->dataPtr->sim_joints_[joint_index]->GetScopedName(), gazebo::common::PID(kp, ki, kd));
+    this->dataPtr->joint_position_pid_[joint_index] = true;
+  }
+}
+
+void GazeboSystem::initJointVelocityPID(
+  const hardware_interface::HardwareInfo & hardware_info,
+  unsigned int joint_index)
+{
+  // Set velocity control PID parameters
+  if (hardware_info.joints[joint_index].parameters.find("velocity_pid") !=
+      hardware_info.joints[joint_index].parameters.end())
+  {
+    std::string::size_type sz;
+    std::string pid_str = hardware_info.joints[joint_index].parameters.at("velocity_pid");
+    double kp = stod(pid_str, &sz);
+    double ki = stod(pid_str.substr(sz), &sz);
+    double kd = stod(pid_str.substr(sz));
+    this->dataPtr->sim_joint_controller_->SetVelocityPID(
+      this->dataPtr->sim_joints_[joint_index]->GetScopedName(), gazebo::common::PID(kp, ki, kd));
+    this->dataPtr->joint_velocity_pid_[joint_index] = true;
   }
 }
 
@@ -367,6 +415,43 @@ GazeboSystem::export_command_interfaces()
   return std::move(this->dataPtr->command_interfaces_);
 }
 
+hardware_interface::return_type
+GazeboSystem::perform_command_mode_switch(
+  const std::vector<std::string> & start_interfaces,
+  const std::vector<std::string> & stop_interfaces)
+{
+  for (unsigned int j = 0; j < this->dataPtr->joint_names_.size(); j++) {
+    for (const std::string & key : stop_interfaces) {
+      // Clear joint control method bits corresponding to stop interfaces
+      if (key == (this->dataPtr->joint_names_[j] + "/" + hardware_interface::HW_IF_POSITION)) {
+        this->dataPtr->joint_control_methods_[j] &= static_cast<ControlMethod_>(VELOCITY & EFFORT);
+      }
+      if (key == (this->dataPtr->joint_names_[j] + "/" + hardware_interface::HW_IF_VELOCITY)) {
+        this->dataPtr->joint_control_methods_[j] &= static_cast<ControlMethod_>(POSITION & EFFORT);
+      }
+      if (key == (this->dataPtr->joint_names_[j] + "/" + hardware_interface::HW_IF_EFFORT)) {
+        this->dataPtr->joint_control_methods_[j] &= static_cast<ControlMethod_>(POSITION & VELOCITY);
+      }
+    }
+
+    // Set joint control method bits corresponding to start interfaces
+    for (const std::string & key : start_interfaces) {
+      if (key == (this->dataPtr->joint_names_[j] + "/" + hardware_interface::HW_IF_POSITION)) {
+        this->dataPtr->joint_control_methods_[j] |= POSITION;
+      }
+      if (key == (this->dataPtr->joint_names_[j] + "/" + hardware_interface::HW_IF_VELOCITY)) {
+        this->dataPtr->joint_control_methods_[j] |= VELOCITY;
+      }
+      if (key == (this->dataPtr->joint_names_[j] + "/" + hardware_interface::HW_IF_EFFORT)) {
+        this->dataPtr->joint_control_methods_[j] |= EFFORT;
+      }
+    }
+  }
+
+  this->dataPtr->sim_joint_controller_->Reset();
+  return hardware_interface::return_type::OK;
+}
+
 hardware_interface::return_type GazeboSystem::start()
 {
   status_ = hardware_interface::status::STARTED;
@@ -428,14 +513,24 @@ hardware_interface::return_type GazeboSystem::write()
   for (unsigned int j = 0; j < this->dataPtr->joint_names_.size(); j++) {
     if (this->dataPtr->sim_joints_[j]) {
       if (this->dataPtr->joint_control_methods_[j] & POSITION) {
-        this->dataPtr->sim_joints_[j]->SetPosition(
-          0, this->dataPtr->joint_position_cmd_[j],
-          true);
+        if (this->dataPtr->joint_position_pid_[j]) {
+          this->dataPtr->sim_joint_controller_->SetPositionTarget(
+            this->dataPtr->sim_joints_[j]->GetScopedName(), this->dataPtr->joint_position_cmd_[j]);
+        } else {
+          this->dataPtr->sim_joints_[j]->SetPosition(
+            0, this->dataPtr->joint_position_cmd_[j],
+            true);
+        }
       }
       if (this->dataPtr->joint_control_methods_[j] & VELOCITY) {
-        this->dataPtr->sim_joints_[j]->SetVelocity(
-          0,
-          this->dataPtr->joint_velocity_cmd_[j]);
+        if (this->dataPtr->joint_velocity_pid_[j]) {
+          this->dataPtr->sim_joint_controller_->SetVelocityTarget(
+            this->dataPtr->sim_joints_[j]->GetScopedName(), this->dataPtr->joint_velocity_cmd_[j]);
+        } else {
+          this->dataPtr->sim_joints_[j]->SetVelocity(
+            0,
+            this->dataPtr->joint_velocity_cmd_[j]);
+        }
       }
       if (this->dataPtr->joint_control_methods_[j] & EFFORT) {
         const double effort =
